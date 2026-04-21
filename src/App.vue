@@ -109,9 +109,14 @@ const activeNewUrl = ref('')
 // Methods
 function isUrlAllowed(url: string): boolean {
   try {
-    const parsed = new URL(url.startsWith('http') ? url : 'https://' + url)
-    const hostAndPath = parsed.host + parsed.pathname + parsed.search
-    return allowedSites.value.some(site => hostAndPath.startsWith(site))
+    const parsed = new URL(url.startsWith('http') ? url : 'https://' + url);
+    if (parsed.protocol !== 'https:') return false;
+    const hostAndPath = parsed.host + parsed.pathname + parsed.search;
+
+    return allowedSites.value.some(site =>
+      hostAndPath === site ||
+      hostAndPath.startsWith(site + '/')
+    );
   } catch {
     return false
   }
