@@ -80,7 +80,7 @@ import axios from 'axios'
 
 document.title = 'HL7 FHIR Spec Diff Viewer - FHIRPath Lab'
 
-const downloaderPrefix = 'http://localhost:7071/api/downloader?url='
+const downloaderPrefix = undefined; //'http://localhost:7071/api/downloader?url='
 
 // Allowlist
 const allowedSites = ref<string[]>([])
@@ -149,13 +149,11 @@ function startCompare() {
 }
 
 function wrapWithProxy(url: string): string {
-  if (url.startsWith('http://hl7.org/fhir/'))
-    url = 'https://' + url.substring(7)
+  if (downloaderPrefix?.length > 0) {
+    url = downloaderPrefix + encodeURIComponent(url);
+  }
 
-  // if (url.startsWith('https://github.com/HL7/') || url.startsWith('https://hl7.org/fhir/'))
-    url = downloaderPrefix + url
-
-    return url
+  return url
 }
 
 function getBaseUrl(url: string): string {
