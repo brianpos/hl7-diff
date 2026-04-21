@@ -1,18 +1,9 @@
 import { createApp } from 'vue'
-import { createRouter, createWebHistory } from 'vue-router'
 import { createVuetify } from 'vuetify'
 import '@mdi/font/css/materialdesignicons.css'
 import './assets/vuetify/main.scss'
 import './assets/variables.scss'
 import App from './App.vue'
-import HtmlDiff from './pages/htmldiff.vue'
-
-const router = createRouter({
-  history: createWebHistory(),
-  routes: [
-    { path: '/', component: HtmlDiff },
-  ],
-})
 
 const vuetify = createVuetify({
   theme: {
@@ -38,6 +29,5 @@ const vuetify = createVuetify({
 })
 
 const app = createApp(App)
-app.use(router)
 app.use(vuetify)
 app.mount('#app')
