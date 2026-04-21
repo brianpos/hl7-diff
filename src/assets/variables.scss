@@ -1,0 +1,19 @@
+// assets/variables.scss
+
+// Import Vuetify 3 SASS variables and functions (must be first)
+@use 'vuetify/settings' as vuetify;
+
+// Variables you want to modify
+$btn-border-radius: 6px;
+
+// Modifying a SASS map variable
+// $material-light: ( cards: blue );
+$label-margin-bottom: 0;
+
+// https://mycolor.space/?hex=%233F81AE&sub=1
+$card-header-color: #79B6E6;
+
+$tab-backcolor: #D2F5FF;
+$tab-color: rgba(0, 0, 0, 0.87);
+
+// Theme overloads
