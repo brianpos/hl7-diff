@@ -1,41 +1,45 @@
 <template>
   <v-app>
-    <div v-if="rawMode" style="font-family: sans-serif; padding: 40px; text-align: center;">
-      <h2>FHIR Spec Diff Viewer</h2>
-      <div style="max-width: 400px; margin: 10px auto; font-size: 0.85em; color: #666; text-align: left;">
-        <p style="text-align: center;">{{ rawStatus }}</p>
-        <div v-if="rawProgressOld || rawProgressNew">
-          <div style="margin-bottom: 4px;">Old: {{ formatBytes(rawProgressOld) }}</div>
-          <div>New: {{ formatBytes(rawProgressNew) }}</div>
-        </div>
-      </div>
-      <v-progress-linear v-if="!rawError && !rawErrorOld && !rawErrorNew" indeterminate color="primary" style="max-width: 400px; margin: 20px auto;" />
-      <div v-if="rawErrorOld || rawErrorNew" style="max-width: 500px; margin: 10px auto; text-align: left; word-break: break-all;">
-        <p v-if="rawErrorOld" style="color: red;"><strong>Old:</strong> {{ rawErrorOld }}</p>
-        <p v-if="rawErrorNew" style="color: red;"><strong>New:</strong> {{ rawErrorNew }}</p>
-      </div>
-      <p v-if="rawError" style="color: red;">{{ rawError }}</p>
-    </div>
-    <div v-else class="main">
-      <div class="container bd-layout" style="padding-top: 100px">
+    <div class="main">
+      <div class="container bd-layout" style="padding: 40px">
+        <h2>HL7 FHIR Spec Diff Viewer</h2>
         <br />
-        <p class="leader">
-          FHIR Spec Diff Viewer
-        </p>
-        <br />
-        <div>
-          <v-text-field density="compact" label="Old Page URL" v-model="oldUrl" />
-          <v-text-field density="compact" label="New Page URL" v-model="newUrl" />
-          <v-btn @click="startCompare" :disabled="!oldUrl || !newUrl">
+        <div v-if="rawMode" class="main">
+          <v-text-field density="compact" :label="'Old Page URL  (' + formatBytes(rawProgressOld) + ')'" v-model="oldUrl" :readonly="loading" :loading="loading" :error-messages="rawErrorOld" />
+          <v-text-field density="compact" :label="'New Page URL  (' + formatBytes(rawProgressNew) + ')'" v-model="newUrl" :readonly="loading" :loading="loading" :error-messages="rawErrorNew" />
+          <v-btn @click="startCompare" :disabled="!oldUrl || !newUrl || loading">
             <v-icon> mdi-file-compare </v-icon> Compare
           </v-btn>
+          <p></p>
           <p v-if="validationError" style="color: red; margin-top: 12px;">{{ validationError }}</p>
+          <div style="max-width: 400px; font-size: 0.85em; color: #666; text-align: left;">
+            <div style="text-align: left;">{{ rawStatus }}</div>
+          </div>
+          <p v-if="rawError" style="color: red;">{{ rawError }}</p>
+        </div>
+        <div v-else class="main">
+          <div>
+            <v-text-field density="compact" label="Old Page URL" v-model="oldUrl" />
+            <v-text-field density="compact" label="New Page URL" v-model="newUrl" />
+            <v-btn @click="startCompare" :disabled="!oldUrl || !newUrl">
+              <v-icon> mdi-file-compare </v-icon> Compare
+            </v-btn>
+            <p v-if="validationError" style="color: red; margin-top: 12px;">{{ validationError }}</p>
+          </div>
         </div>
       </div>
     </div>
   </v-app>
 </template>
 
+<style scoped>
+.error-url {
+  font-size: 0.8em;
+  font-style: italic;
+  color: #555;
+  padding-left: 40px;
+}
+</style>
 <style>
 .diffins {
   background-color: #b6ffa7;
@@ -68,26 +72,13 @@ p {
   text-justify: inter-word;
 }
 
-.main::before {
-  content: "";
-  position: fixed;
-  top: 0;
-  bottom: 0;
-  left: 0;
-  right: 0;
-  background-image: url('/fhir-lab-ico-300x300.png');
-  background-position: center;
-  background-attachment: fixed;
-  opacity: 0.2;
-  z-index: -1;
-}
 </style>
 
 <script setup lang="ts">
 import { ref, onMounted } from 'vue'
 import axios from 'axios'
 
-document.title = 'FHIR Spec Diff Viewer - FHIRPath Lab'
+document.title = 'HL7 FHIR Spec Diff Viewer - FHIRPath Lab'
 
 const downloaderPrefix = 'http://localhost:7071/api/downloader?url='
 
@@ -97,6 +88,7 @@ const validationError = ref('')
 
 // Reactive state
 const rawMode = ref(false)
+const loading = ref(false)
 const rawStatus = ref('')
 const rawError = ref('')
 const rawErrorOld = ref('')
@@ -505,12 +497,12 @@ function formatDownloadError(error: any, url: string): string {
     const status = error.response.status
     const statusText = error.response.statusText || ''
     const data = typeof error.response.data === 'string' ? error.response.data.substring(0, 200) : ''
-    return `${url} — ${status} ${statusText}${data ? ': ' + data : ''}`
+    return `${status} ${statusText}${data ? ': ' + data : ''}`
   }
   if (error.request && !error.response) {
-    return `${url} — Request failed (likely blocked by CORS). The server may not allow cross-origin requests.`
+    return `Request failed (likely blocked by CORS). The server may not allow cross-origin requests.`
   }
-  return `${url} — ${error.message || 'Unknown error'}`
+  return `${error.message || 'Unknown error'}`
 }
 
 function resolvedUrl(response: any, originalUrl: string, usedProxy: boolean): string {
@@ -521,6 +513,8 @@ function resolvedUrl(response: any, originalUrl: string, usedProxy: boolean): st
 }
 
 function downloadAndCompare(oldPageUrl: string, newPageUrl: string) {
+  loading.value = true;
+
   rawMode.value = true
   rawStatus.value = 'Downloading pages...'
   rawError.value = ''
@@ -551,11 +545,16 @@ function downloadAndCompare(oldPageUrl: string, newPageUrl: string) {
   })
 
   Promise.all([fetchOld, fetchNew]).then(([oldResponse, newResponse]) => {
-    if (!oldResponse || !newResponse) return
+    if (!oldResponse || !newResponse) {
+      rawStatus.value = 'Diff evaluation cancelled — failed download';
+      loading.value = false;
+      return
+    }
     activeOldUrl.value = resolvedUrl(oldResponse, oldPageUrl, oldUsedProxy)
     activeNewUrl.value = resolvedUrl(newResponse, newPageUrl, newUsedProxy)
     oldSpecHtml.value = oldResponse.data
     newSpecHtml.value = newResponse.data
+    loading.value = false;
     return comparePages()
   })
 }
@@ -563,21 +562,25 @@ function downloadAndCompare(oldPageUrl: string, newPageUrl: string) {
 // Load allowlist, then auto-compare if query params are present
 onMounted(async () => {
   try {
-    const resp = await axios.get('/allowed-sites.json')
+    const resp = await axios.get('allowed-sites.json')
     allowedSites.value = resp.data.allowedSites
   } catch (e) {
     console.error('Failed to load allowed sites', e)
   }
   const params = new URLSearchParams(window.location.search)
   const qOld = params.get('old')
+  if (qOld) oldUrl.value = qOld
+
   const qNew = params.get('new')
+  if (qNew) newUrl.value = qNew
+
   if (qOld && qNew) {
-    if (!validateUrls(qOld, qNew)) {
+    if (!validateUrls(oldUrl.value, newUrl.value)) {
       rawError.value = validationError.value
       rawMode.value = true
       return
     }
-    downloadAndCompare(qOld, qNew)
+    downloadAndCompare(oldUrl.value, newUrl.value)
   }
 })
 </script>
