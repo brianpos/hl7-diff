@@ -3,7 +3,8 @@ import vue from '@vitejs/plugin-vue'
 import vuetify from 'vite-plugin-vuetify'
 import { fileURLToPath, URL } from 'node:url'
 
-export default defineConfig({
+export default defineConfig(({ command }) => ({
+  base: command === 'build' ? '/diff/' : '/',
   plugins: [
     vue(),
     vuetify({
@@ -20,4 +21,4 @@ export default defineConfig({
   server: {
     port: 3000,
   },
-})
+}))
