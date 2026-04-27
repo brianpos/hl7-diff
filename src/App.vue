@@ -169,7 +169,7 @@ function getBaseUrl(url: string): string {
   return url.substring(0, lastSlash + 1)
 }
 
-function rebaseHeadUrls(html: string, baseUrl: string): string {
+function rebaseHeadUrls(html: string, newBaseUrl: string, oldBaseUrl: string): string {
   const parser = new DOMParser()
   const doc = parser.parseFromString(html, 'text/html')
 
@@ -177,8 +177,31 @@ function rebaseHeadUrls(html: string, baseUrl: string): string {
     for (const attr of ['href', 'src']) {
       const val = el.getAttribute(attr)
       if (val && !/^(https?:\/\/|\/\/|data:|#|mailto:)/i.test(val)) {
-        el.setAttribute(attr, baseUrl + val)
+        el.setAttribute(attr, newBaseUrl + val)
       }
+    }
+  })
+
+  // Rewrite any <meta http-equiv="refresh"> redirects to point at the diff page
+  // instead of navigating away, mirroring what rewriteRelativeLinks does for body links.
+  const diffPagePath = window.location.pathname
+  doc.head.querySelectorAll('meta[http-equiv]').forEach(el => {
+    if (el.getAttribute('http-equiv')?.toLowerCase() !== 'refresh') return
+    const content = el.getAttribute('content') || ''
+    // Content is either just a delay ("5") or "delay; url=<url>"
+    const match = content.match(/^(\d+);\s*url\s*=\s*['"]?([^'"]+?)['"]?\s*$/i)
+    if (!match) return
+    const delay = match[1]
+    const rawUrl = match[2].trim()
+    try {
+      const newTarget = new URL(rawUrl, newBaseUrl).href
+      const oldTarget = new URL(rawUrl, oldBaseUrl).href
+      const diffUrl = diffPagePath + '?old=' + encodeURIComponent(oldTarget) + '&new=' + encodeURIComponent(newTarget)
+      el.setAttribute('content', delay + '; url=' + diffUrl)
+    } catch (e) {
+      // If URL resolution fails, remove the tag to prevent a broken redirect
+      console.warn('Failed to resolve meta refresh URL, removing tag:', rawUrl, e)
+      el.remove()
     }
   })
 
@@ -264,7 +287,7 @@ function renderRawDiff(diffHtml: string, oldPageUrl: string, newPageUrl: string)
   const newBaseUrl = getBaseUrl(newPageUrl)
   const oldBaseUrl = getBaseUrl(oldPageUrl)
 
-  const headContent = rebaseHeadUrls(newSpecHtml.value, newBaseUrl)
+  const headContent = rebaseHeadUrls(newSpecHtml.value, newBaseUrl, oldBaseUrl)
   diffHtml = rebaseBodySrcUrls(diffHtml, newBaseUrl)
   diffHtml = rewriteRelativeLinks(diffHtml, oldBaseUrl, newBaseUrl)
 
