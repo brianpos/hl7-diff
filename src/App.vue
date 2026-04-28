@@ -80,7 +80,7 @@ import axios from 'axios'
 
 document.title = 'HL7 FHIR Spec Diff Viewer - FHIRPath Lab'
 
-const downloaderPrefix = undefined; //'http://localhost:7071/api/downloader?url='
+const downloaderPrefix = undefined; //'https://fhirpath-lab-dotnet2.azurewebsites.net/api/downloader?url='
 
 // Allowlist
 const allowedSites = ref<string[]>([])
@@ -291,6 +291,12 @@ function renderRawDiff(diffHtml: string, oldPageUrl: string, newPageUrl: string)
   diffHtml = rebaseBodySrcUrls(diffHtml, newBaseUrl)
   diffHtml = rewriteRelativeLinks(diffHtml, oldBaseUrl, newBaseUrl)
 
+  // Link back to the bare compare page (URLs prefilled, but not auto-compared)
+  const editUrl = window.location.pathname
+    + '?old=' + encodeURIComponent(oldPageUrl)
+    + '&new=' + encodeURIComponent(newPageUrl)
+    + '&edit=1'
+
   const fullHtml = `<!DOCTYPE html>
 <html>
 <head>
@@ -310,13 +316,14 @@ ins.diffmod { background-color: #b6ffa7; }
   z-index: 10000;
   display: flex;
   flex-direction: column;
-  align-items: center;
+  align-items: stretch;
   gap: 4px;
   background: white;
   border: 1px solid #ccc;
   border-left: none;
   border-radius: 0 8px 8px 0;
-  padding: 6px 8px 6px 6px;
+  /* No top padding: compare button sits flush against the top edge */
+  padding: 0 8px 6px 6px;
   box-shadow: 2px 2px 8px rgba(0,0,0,0.15);
   font-family: sans-serif;
   font-size: 13px;
@@ -336,12 +343,32 @@ ins.diffmod { background-color: #b6ffa7; }
 #diff-nav button:hover { background: #e0e0e0; }
 #diff-nav .diff-row button:first-child { border-radius: 4px 0 0 4px; }
 #diff-nav .diff-row button:last-child { border-radius: 0 4px 4px 0; border-left: none; }
+#diff-nav .diff-edit-link {
+  display: block;
+  /* Negative side margins extend the link past the nav bar's left/right padding (6px / 8px) */
+  margin: 0 -8px 2px -6px;
+  padding: 3px 6px;
+  background: #777;
+  color: #fff;
+  text-decoration: none;
+  text-align: center;
+  font-size: 11px;
+  font-family: inherit;
+  /* Match nav bar's top-right rounding; flat elsewhere */
+  border-radius: 0 8px 0 0;
+  letter-spacing: 0.5px;
+  text-transform: lowercase;
+  box-sizing: border-box;
+}
+#diff-nav .diff-edit-link:hover { background: #555; }
 #diff-nav .diff-row {
   display: flex;
-  width: 100%;
+  /* Recenter rows now that nav uses align-items: stretch */
+  align-self: center;
 }
 #diff-nav .diff-pos {
   display: flex;
+  align-self: center;
   align-items: center;
   gap: 2px;
   white-space: nowrap;
@@ -364,6 +391,7 @@ ins.diffmod { background-color: #b6ffa7; }
 </head>
 <body>
 <div id="diff-nav">
+  <a class="diff-edit-link" href="${editUrl}" title="Edit URLs / back to compare page">compare</a>
   <div class="diff-row">
     <button onclick="diffNavPrev()" title="Previous change ( , )">&#x2191;</button>
     <button onclick="diffNavPrevSection()" title="Skip to previous off-screen change ( < )">&#x21D1;</button>
@@ -389,6 +417,20 @@ window.addEventListener('load', function() {
       return other !== el && el.contains(other);
     });
   });
+  // Skip zero-size diffs (collapsed/empty elements that wouldn't show a
+  // visible highlight box anyway). Logged once for visibility.
+  var skippedZeroSize = 0;
+  diffs = diffs.filter(function(el) {
+    var rect = el.getBoundingClientRect();
+    if (rect.width === 0 && rect.height === 0) {
+      skippedZeroSize++;
+      return false;
+    }
+    return true;
+  });
+  if (skippedZeroSize > 0) {
+    console.log('[diffNav] skipped ' + skippedZeroSize + ' zero-size diff element(s)');
+  }
   var currentIdx = -1;
   var counter = document.getElementById('diff-counter');
   var total = document.getElementById('diff-total');
@@ -403,7 +445,7 @@ window.addEventListener('load', function() {
       var el = diffs[currentIdx];
       el.classList.add('diff-current-highlight');
       if (scroll !== false && !isInViewport(el))
-        el.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        el.scrollIntoView({ behavior: 'auto', block: 'center' });
       counter.value = String(currentIdx + 1);
     }
   }
@@ -502,10 +544,30 @@ window.addEventListener('load', function() {
     else if (e.key === '.' || e.key === ']') { diffNavNext(); e.preventDefault(); }
     else if (e.key === ',' || e.key === '[') { diffNavPrev(); e.preventDefault(); }
   });
+
+  // Auto-select the first change if it's already visible in the initial
+  // viewport. We pass scroll=false so the page doesn't jump.
+  for (var i = 0; i < diffs.length; i++) {
+    if (isInViewport(diffs[i])) {
+      highlight(i, false);
+      break;
+    }
+  }
 });
 <\/script>
 </body>
 </html>`
+
+  // Insert an `edit=1` history entry behind the current diff entry so that the
+  // browser Back button returns to the bare compare page (with URLs prefilled)
+  // rather than re-running the diff. We do this only on the initial render
+  // (renderRawDiff runs at most once per page load — document.write below
+  // destroys the Vue app, so any subsequent diff is a fresh page navigation).
+  const diffUrl = window.location.pathname
+    + '?old=' + encodeURIComponent(oldPageUrl)
+    + '&new=' + encodeURIComponent(newPageUrl)
+  history.replaceState(null, '', editUrl)
+  history.pushState(null, '', diffUrl)
 
   document.open()
   document.write(fullHtml)
@@ -538,6 +600,117 @@ function resolvedUrl(response: any, originalUrl: string, usedProxy: boolean): st
   return finalUrl
 }
 
+// HL7 IGs (newer template) ship a tiny stub page whose body is just two
+// inline scripts: one defining `langs = ["en", ...]` and one sourcing
+// `assets/js/lang-redirects.js`. That redirect script picks a language from
+// `navigator.language` and client-side redirects to `<lang>/<pageName>`.
+// When we fetch such a page directly we get the stub (no real content), so
+// we detect the marker, replicate the language-selection logic ourselves,
+// and re-fetch from the language sub-path. Older IGs don't have this script
+// and serve content directly — those return null and are left untouched.
+function resolveLangRedirectTarget(html: string, pageUrl: string): string | null {
+  // Cheap pre-check to avoid parsing every page
+  if (!/lang-redirects?\.js/i.test(html)) return null
+
+  let doc: Document
+  try {
+    doc = new DOMParser().parseFromString(html, 'text/html')
+  } catch {
+    return null
+  }
+
+  // Confirm the redirect script tag is actually present
+  const hasRedirectScript = Array.from(doc.querySelectorAll('script[src]'))
+    .some(s => /lang-redirects?\.js(\?|$)/i.test(s.getAttribute('src') || ''))
+  if (!hasRedirectScript) return null
+
+  // Find the inline script that defines `langs = [...]`
+  let langs: string[] | null = null
+  for (const s of Array.from(doc.querySelectorAll('script:not([src])'))) {
+    const text = s.textContent || ''
+    const m = text.match(/langs\s*=\s*(\[[^\]]*\])/)
+    if (!m) continue
+    try {
+      const parsed = JSON.parse(m[1].replace(/'/g, '"'))
+      if (Array.isArray(parsed) && parsed.every(x => typeof x === 'string') && parsed.length > 0) {
+        langs = parsed
+        break
+      }
+    } catch { /* keep looking */ }
+  }
+  if (!langs) return null
+
+  // Mirror lang-redirects.js selection logic exactly:
+  //   exact match OR userLang.startsWith(lang + "-"), else fall back to langs[0]
+  const userLang = (navigator.language || (navigator as any).userLanguage || '') as string
+  let chosen = langs[0]
+  for (const l of langs) {
+    if (userLang === l || userLang.startsWith(l + '-')) { chosen = l; break }
+  }
+
+  // pageName = last segment of the URL path (matches the original script).
+  // For URLs ending in '/', pageName is empty and the target becomes
+  // `<base>/<lang>/`, which the server resolves to its default index.
+  try {
+    const u = new URL(pageUrl)
+    const path = u.pathname
+    const pageName = path.substring(path.lastIndexOf('/') + 1)
+    const basePath = path.substring(0, path.lastIndexOf('/') + 1)
+    u.pathname = basePath + chosen + '/' + pageName
+    return u.toString()
+  } catch {
+    return null
+  }
+}
+
+// Strip the lang-redirects.js script tag (and its companion `langs=[...]`
+// inline script) from HTML before we render it. We've already followed the
+// redirect ourselves; leaving the tag in would either do nothing (we're
+// already on the lang sub-page) or, in the rare case the resolved page still
+// references it, redirect again.
+function stripLangRedirectScript(html: string): string {
+  return html
+    .replace(/<script\b[^>]*\bsrc\s*=\s*["'][^"']*lang-redirects?\.js[^"']*["'][^>]*>\s*<\/script>/gi, '')
+    .replace(/<script\b[^>]*>\s*(?:\/\/[^\n]*\n\s*)*langs\s*=\s*\[[^\]]*\]\s*;?\s*<\/script>/gi, '')
+}
+
+function fetchPage(
+  pageUrl: string,
+  onProgress: (loaded: number) => void,
+  onError: (msg: string) => void,
+  followLangRedirect = true,
+): Promise<{ html: string; resolvedUrl: string } | null> {
+  const proxied = wrapWithProxy(pageUrl)
+  const usedProxy = proxied !== pageUrl
+  return axios.get(proxied, {
+    onDownloadProgress: (e) => onProgress(e.loaded),
+  }).then(async response => {
+    const finalUrl = resolvedUrl(response, pageUrl, usedProxy)
+    const html: string = response.data
+
+    if (followLangRedirect) {
+      const langTarget = resolveLangRedirectTarget(html, finalUrl)
+      if (langTarget && langTarget !== finalUrl) {
+        // Validate against allowlist before following — same host/path as the
+        // original, so this should always pass, but be defensive.
+        if (!isUrlAllowed(langTarget)) {
+          console.warn('lang-redirect target not in allowlist, ignoring:', langTarget)
+        } else {
+          // Reset progress for the second fetch so the UI reflects the real download
+          onProgress(0)
+          const followed = await fetchPage(langTarget, onProgress, onError, false)
+          if (followed) return followed
+        }
+      }
+    }
+
+    return { html: stripLangRedirectScript(html), resolvedUrl: finalUrl }
+  }).catch(error => {
+    onError(formatDownloadError(error, pageUrl))
+    return null
+  })
+}
+
 function downloadAndCompare(oldPageUrl: string, newPageUrl: string) {
   loading.value = true;
 
@@ -551,35 +724,27 @@ function downloadAndCompare(oldPageUrl: string, newPageUrl: string) {
   activeOldUrl.value = oldPageUrl  // fallback, updated after download with resolved URL
   activeNewUrl.value = newPageUrl
 
-  const proxiedOld = wrapWithProxy(oldPageUrl)
-  const proxiedNew = wrapWithProxy(newPageUrl)
-  const oldUsedProxy = proxiedOld !== oldPageUrl
-  const newUsedProxy = proxiedNew !== newPageUrl
+  const fetchOld = fetchPage(
+    oldPageUrl,
+    (loaded) => { rawProgressOld.value = loaded },
+    (msg) => { rawErrorOld.value = msg },
+  )
+  const fetchNew = fetchPage(
+    newPageUrl,
+    (loaded) => { rawProgressNew.value = loaded },
+    (msg) => { rawErrorNew.value = msg },
+  )
 
-  const fetchOld = axios.get(proxiedOld, {
-    onDownloadProgress: (e) => { rawProgressOld.value = e.loaded }
-  }).catch(error => {
-    rawErrorOld.value = formatDownloadError(error, oldPageUrl)
-    return null
-  })
-
-  const fetchNew = axios.get(proxiedNew, {
-    onDownloadProgress: (e) => { rawProgressNew.value = e.loaded }
-  }).catch(error => {
-    rawErrorNew.value = formatDownloadError(error, newPageUrl)
-    return null
-  })
-
-  Promise.all([fetchOld, fetchNew]).then(([oldResponse, newResponse]) => {
-    if (!oldResponse || !newResponse) {
+  Promise.all([fetchOld, fetchNew]).then(([oldResult, newResult]) => {
+    if (!oldResult || !newResult) {
       rawStatus.value = 'Diff evaluation cancelled — failed download';
       loading.value = false;
       return
     }
-    activeOldUrl.value = resolvedUrl(oldResponse, oldPageUrl, oldUsedProxy)
-    activeNewUrl.value = resolvedUrl(newResponse, newPageUrl, newUsedProxy)
-    oldSpecHtml.value = oldResponse.data
-    newSpecHtml.value = newResponse.data
+    activeOldUrl.value = oldResult.resolvedUrl
+    activeNewUrl.value = newResult.resolvedUrl
+    oldSpecHtml.value = oldResult.html
+    newSpecHtml.value = newResult.html
     loading.value = false;
     return comparePages()
   })
@@ -600,7 +765,11 @@ onMounted(async () => {
   const qNew = params.get('new')
   if (qNew) newUrl.value = qNew
 
-  if (qOld && qNew) {
+  // edit=1 means: prefill the form but don't auto-compare
+  // (used by the 'compare' link in the diff nav bar to return to the bare page)
+  const editMode = params.get('edit') === '1'
+
+  if (qOld && qNew && !editMode) {
     if (!validateUrls(oldUrl.value, newUrl.value)) {
       rawError.value = validationError.value
       rawMode.value = true
