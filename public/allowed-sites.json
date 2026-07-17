@@ -4,6 +4,7 @@
     "hl7.org/cda/stds",
     "hl7.org/xprod/ig",
     "build.fhir.org",
+    "local.fhir.org",
     "terminology.hl7.org",
     "cds-hooks.hl7.org",
     "fhir.org/guides",

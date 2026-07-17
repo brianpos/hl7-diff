@@ -225,6 +225,44 @@ function extractBody(html: string): string {
   return match ? match[1] : html
 }
 
+const releaseHeaderPlaceholderSelector = '[data-hl7-diff-release-header]'
+const releaseHeaderPlaceholderHtml = '<div data-hl7-diff-release-header="true"></div>'
+
+function normalizeReleaseHeaders(oldHtml: string, newHtml: string) {
+  const releaseHeaderPattern = /<!--\s*ReleaseHeader\s*-->[\s\S]*?<!--\s*EndReleaseHeader\s*-->/i
+  if (!releaseHeaderPattern.test(oldHtml) && !releaseHeaderPattern.test(newHtml)) {
+    return { oldHtml, newHtml, hasReleaseHeader: false }
+  }
+
+  const normalizePage = (html: string): string => {
+    const container = document.createElement('div')
+    container.innerHTML = html.replace(releaseHeaderPattern, releaseHeaderPlaceholderHtml)
+
+    if (!container.querySelector(releaseHeaderPlaceholderSelector)) {
+      const statusBanner = Array.from(container.querySelectorAll('p')).find((paragraph) =>
+        paragraph.id === 'publish-box'
+        || /Continuous Integration Build of FHIR/i.test(paragraph.textContent || '')
+      )
+      const placeholder = document.createElement('div')
+      placeholder.setAttribute('data-hl7-diff-release-header', 'true')
+
+      if (statusBanner) {
+        statusBanner.replaceWith(placeholder)
+      } else {
+        container.querySelector('ul.nav.nav-tabs')?.before(placeholder)
+      }
+    }
+
+    return container.innerHTML
+  }
+
+  return {
+    oldHtml: normalizePage(oldHtml),
+    newHtml: normalizePage(newHtml),
+    hasReleaseHeader: true,
+  }
+}
+
 function executeDiffInWorker(oldHtml: string, newHtml: string): Promise<string> {
   return new Promise((resolve, reject) => {
     const worker = new Worker(
@@ -243,14 +281,341 @@ function executeDiffInWorker(oldHtml: string, newHtml: string): Promise<string> 
   })
 }
 
+type TabListKind = 'navigation' | 'resource-content'
+
+interface TabEntry {
+  listItem: HTMLLIElement
+  label: string
+  key: string
+}
+
+function tabKey(label: string, kind: TabListKind): string {
+  const normalized = label.replace(/\s+/g, ' ').trim().toLowerCase()
+  if (normalized === 'profiles' || normalized === 'profiles & extensions') return 'profiles'
+  if (kind === 'resource-content' && (normalized === 'version diff' || /^r\d+b? diff$/.test(normalized))) {
+    return 'version-diff'
+  }
+  if (/^r\d+b? conversions$/.test(normalized)) return 'version-conversions'
+  return normalized
+}
+
+function tabEntries(list: HTMLUListElement, kind: TabListKind): TabEntry[] {
+  return Array.from(list.children)
+    .filter((child): child is HTMLLIElement => child instanceof HTMLLIElement)
+    .map((listItem) => {
+      const label = listItem.querySelector('a')?.textContent || ''
+      return { listItem, label, key: tabKey(label, kind) }
+    })
+}
+
+function wrapTabLabel(listItem: HTMLLIElement, tagName: 'ins' | 'del', className: string) {
+  const anchor = listItem.querySelector('a')
+  if (!anchor) return
+  const marker = document.createElement(tagName)
+  marker.className = className
+  marker.append(...Array.from(anchor.childNodes))
+  anchor.appendChild(marker)
+}
+
+function disableResourceTab(listItem: HTMLLIElement) {
+  listItem.dataset.diffDisabled = 'true'
+  listItem.classList.add('ui-state-disabled')
+  const anchor = listItem.querySelector('a')
+  anchor?.setAttribute('aria-disabled', 'true')
+  anchor?.setAttribute('tabindex', '-1')
+}
+
+function buildNewNavigationTabList(newList: HTMLUListElement): HTMLUListElement {
+  const result = newList.cloneNode(true) as HTMLUListElement
+  tabEntries(result, 'navigation').forEach(({ listItem, key }) => {
+    if (key !== 'version-conversions') return
+    listItem.classList.add('disabled')
+    const anchor = listItem.querySelector('a')
+    anchor?.removeAttribute('href')
+    anchor?.setAttribute('aria-disabled', 'true')
+    anchor?.setAttribute('tabindex', '-1')
+  })
+  return result
+}
+
+function compareTabLabel(listItem: HTMLLIElement, oldLabel: string, newLabel: string) {
+  const anchor = listItem.querySelector('a')
+  if (!anchor || oldLabel === newLabel) return
+
+  anchor.replaceChildren()
+  let prefixLength = 0
+  while (
+    prefixLength < oldLabel.length &&
+    prefixLength < newLabel.length &&
+    oldLabel[prefixLength] === newLabel[prefixLength]
+  ) {
+    prefixLength++
+  }
+
+  let suffixLength = 0
+  while (
+    suffixLength < oldLabel.length - prefixLength &&
+    suffixLength < newLabel.length - prefixLength &&
+    oldLabel[oldLabel.length - suffixLength - 1] === newLabel[newLabel.length - suffixLength - 1]
+  ) {
+    suffixLength++
+  }
+
+  const prefix = newLabel.substring(0, prefixLength)
+  const oldMiddle = oldLabel.substring(prefixLength, oldLabel.length - suffixLength)
+  const newMiddle = newLabel.substring(prefixLength, newLabel.length - suffixLength)
+  const suffix = newLabel.substring(newLabel.length - suffixLength)
+
+  anchor.append(prefix)
+  if (oldMiddle) {
+    const removed = document.createElement('del')
+    removed.className = 'diffmod'
+    removed.textContent = oldMiddle
+    anchor.appendChild(removed)
+  }
+  if (newMiddle) {
+    const inserted = document.createElement('ins')
+    inserted.className = 'diffmod'
+    inserted.textContent = newMiddle
+    anchor.appendChild(inserted)
+  }
+  anchor.append(suffix)
+}
+
+function buildComparedTabList(
+  oldList: HTMLUListElement,
+  newList: HTMLUListElement,
+  kind: TabListKind,
+): HTMLUListElement {
+  const oldTabs = tabEntries(oldList, kind)
+  const newTabs = tabEntries(newList, kind)
+  const lengths = Array.from({ length: oldTabs.length + 1 }, () =>
+    Array<number>(newTabs.length + 1).fill(0),
+  )
+
+  for (let oldIndex = oldTabs.length - 1; oldIndex >= 0; oldIndex--) {
+    for (let newIndex = newTabs.length - 1; newIndex >= 0; newIndex--) {
+      lengths[oldIndex][newIndex] = oldTabs[oldIndex].key === newTabs[newIndex].key
+        ? lengths[oldIndex + 1][newIndex + 1] + 1
+        : Math.max(lengths[oldIndex + 1][newIndex], lengths[oldIndex][newIndex + 1])
+    }
+  }
+
+  const result = newList.cloneNode(false) as HTMLUListElement
+  let oldIndex = 0
+  let newIndex = 0
+  while (oldIndex < oldTabs.length || newIndex < newTabs.length) {
+    if (
+      oldIndex < oldTabs.length &&
+      newIndex < newTabs.length &&
+      oldTabs[oldIndex].key === newTabs[newIndex].key
+    ) {
+      if (kind === 'resource-content' && newTabs[newIndex].key === 'version-diff') {
+        const oldListItem = oldTabs[oldIndex].listItem.cloneNode(true) as HTMLLIElement
+        const newListItem = newTabs[newIndex].listItem.cloneNode(true) as HTMLLIElement
+        oldListItem.querySelector('a')?.setAttribute('href', '#tabs-diff-old')
+        newListItem.querySelector('a')?.setAttribute('href', '#tabs-diff-new')
+        wrapTabLabel(oldListItem, 'del', 'diffdel')
+        wrapTabLabel(newListItem, 'ins', 'diffins')
+        disableResourceTab(oldListItem)
+        result.append(oldListItem, newListItem)
+        oldIndex++
+        newIndex++
+        continue
+      }
+
+      const listItem = newTabs[newIndex].listItem.cloneNode(true) as HTMLLIElement
+      compareTabLabel(listItem, oldTabs[oldIndex].label, newTabs[newIndex].label)
+      if (kind === 'resource-content' && newTabs[newIndex].key === 'all') {
+        disableResourceTab(listItem)
+      }
+      result.appendChild(listItem)
+      oldIndex++
+      newIndex++
+    } else if (
+      newIndex >= newTabs.length ||
+      (oldIndex < oldTabs.length && lengths[oldIndex + 1][newIndex] >= lengths[oldIndex][newIndex + 1])
+    ) {
+      const listItem = oldTabs[oldIndex].listItem.cloneNode(true) as HTMLLIElement
+      listItem.classList.remove('active')
+      wrapTabLabel(listItem, 'del', 'diffdel')
+      result.appendChild(listItem)
+      oldIndex++
+    } else {
+      const listItem = newTabs[newIndex].listItem.cloneNode(true) as HTMLLIElement
+      wrapTabLabel(listItem, 'ins', 'diffins')
+      result.appendChild(listItem)
+      newIndex++
+    }
+  }
+
+  return result
+}
+
+function maskSpecialResourcePanels(html: string): string {
+  const container = document.createElement('div')
+  container.innerHTML = html
+
+  for (const panelId of ['tabs-uml', 'tabs-diff', 'tabs-all']) {
+    const panel = container.querySelector<HTMLElement>(`#${panelId}`)
+    if (!panel) continue
+    const placeholder = document.createElement('span')
+    placeholder.dataset.diffPanelPlaceholder = panelId
+    panel.replaceChildren(placeholder)
+  }
+
+  return container.innerHTML
+}
+
+function prefixFragmentIds(root: HTMLElement, prefix: string) {
+  const idMap = new Map<string, string>()
+  root.querySelectorAll<HTMLElement>('[id]').forEach((element) => {
+    const oldId = element.id
+    const newId = `${prefix}${oldId}`
+    idMap.set(oldId, newId)
+    element.id = newId
+  })
+
+  root.querySelectorAll<HTMLElement>('*').forEach((element) => {
+    Array.from(element.attributes).forEach((attribute) => {
+      let value = attribute.value.replace(/url\(\s*#([^)\s]+)\s*\)/g, (match, id) =>
+        idMap.has(id) ? `url(#${idMap.get(id)})` : match,
+      )
+      if (value.startsWith('#') && idMap.has(value.substring(1))) {
+        value = `#${idMap.get(value.substring(1))}`
+      }
+      if (value !== attribute.value) {
+        element.setAttribute(attribute.name, value)
+      }
+    })
+  })
+}
+
+function clonePanelContent(panel: HTMLElement, className: string, source: 'old' | 'new'): HTMLDivElement {
+  const wrapper = document.createElement('div')
+  wrapper.className = className
+  wrapper.dataset.diffSource = source
+  wrapper.append(...Array.from(panel.childNodes, (node) => node.cloneNode(true)))
+  prefixFragmentIds(wrapper, `diff-${source}-`)
+  return wrapper
+}
+
+function cloneVersionPanel(panel: HTMLElement, source: 'old' | 'new', includeContent = true): HTMLElement {
+  const clone = panel.cloneNode(includeContent) as HTMLElement
+  clone.removeAttribute('id')
+  prefixFragmentIds(clone, `diff-${source}-`)
+  clone.id = `tabs-diff-${source}`
+  clone.dataset.diffSource = source
+  return clone
+}
+
+function restoreSpecialResourcePanels(
+  diffContainer: HTMLElement,
+  oldContainer: HTMLElement,
+  newContainer: HTMLElement,
+) {
+  const diffUmlPanel = diffContainer.querySelector<HTMLElement>('#tabs-uml')
+  const oldUmlPanel = oldContainer.querySelector<HTMLElement>('#tabs-uml')
+  const newUmlPanel = newContainer.querySelector<HTMLElement>('#tabs-uml')
+  if (diffUmlPanel && oldUmlPanel && newUmlPanel) {
+    diffUmlPanel.replaceChildren(
+      clonePanelContent(oldUmlPanel, 'diffdel', 'old'),
+      clonePanelContent(newUmlPanel, 'diffins', 'new'),
+    )
+  }
+
+  const diffVersionPanel = diffContainer.querySelector<HTMLElement>('#tabs-diff')
+  const oldVersionPanel = oldContainer.querySelector<HTMLElement>('#tabs-diff')
+  const newVersionPanel = newContainer.querySelector<HTMLElement>('#tabs-diff')
+  if (diffVersionPanel && oldVersionPanel && newVersionPanel) {
+    diffVersionPanel.replaceWith(
+      cloneVersionPanel(oldVersionPanel, 'old', false),
+      cloneVersionPanel(newVersionPanel, 'new'),
+    )
+  }
+
+  diffContainer.querySelector<HTMLElement>('#tabs-all')?.replaceChildren()
+}
+
+function replaceComparedTabLists(diffHtml: string, oldHtml: string, newHtml: string): string {
+  const oldContainer = document.createElement('div')
+  const newContainer = document.createElement('div')
+  const diffContainer = document.createElement('div')
+  oldContainer.innerHTML = oldHtml
+  newContainer.innerHTML = newHtml
+  diffContainer.innerHTML = diffHtml
+
+  const newGlobalNavigation = newContainer.querySelector<HTMLElement>('nav.navbar.navbar-inverse')
+  const diffGlobalNavigation = diffContainer.querySelector<HTMLElement>('nav.navbar.navbar-inverse')
+  if (newGlobalNavigation && diffGlobalNavigation) {
+    diffGlobalNavigation.replaceWith(newGlobalNavigation.cloneNode(true))
+  }
+
+  const newFooter = newContainer.querySelector<HTMLElement>('#segment-footer')
+  const diffFooter = diffContainer.querySelector<HTMLElement>('#segment-footer')
+  if (newFooter && diffFooter) {
+    diffFooter.replaceWith(newFooter.cloneNode(true))
+  }
+
+  const newNavigation = newContainer.querySelector<HTMLUListElement>('ul.nav.nav-tabs')
+  const diffNavigation = diffContainer.querySelector<HTMLUListElement>('ul.nav.nav-tabs')
+  if (newNavigation && diffNavigation) {
+    diffNavigation.replaceWith(buildNewNavigationTabList(newNavigation))
+  }
+
+  const oldResourceTabs = oldContainer.querySelector<HTMLUListElement>('#tabs > ul')
+  const newResourceTabs = newContainer.querySelector<HTMLUListElement>('#tabs > ul')
+  const diffResourceTabs = diffContainer.querySelector<HTMLUListElement>('#tabs > ul')
+  if (oldResourceTabs && newResourceTabs && diffResourceTabs) {
+    diffResourceTabs.replaceWith(buildComparedTabList(oldResourceTabs, newResourceTabs, 'resource-content'))
+  }
+
+  const isTabInitializer = (script: HTMLScriptElement) =>
+    /\$\s*\(\s*['"]#tabs['"]\s*\)\.tabs\s*\(/.test(script.textContent || '')
+  const newTabInitializer = Array.from(newContainer.querySelectorAll<HTMLScriptElement>('script:not([src])'))
+    .find(isTabInitializer)
+  const diffTabInitializer = Array.from(diffContainer.querySelectorAll<HTMLScriptElement>('script:not([src])'))
+    .find(isTabInitializer)
+  if (newTabInitializer && diffTabInitializer) {
+    const initializer = newTabInitializer.cloneNode(true) as HTMLScriptElement
+    initializer.textContent += `
+try {
+  var diffDisabledTabs = [];
+  $('#tabs > ul > li[data-diff-disabled="true"]').each(function() {
+    diffDisabledTabs.push($(this).index());
+  });
+  var diffActiveTab = $('#tabs').tabs('option', 'active');
+  if (diffDisabledTabs.indexOf(diffActiveTab) !== -1) {
+    $('#tabs').tabs('option', 'active', 0);
+  }
+  $('#tabs').tabs('option', 'disabled', diffDisabledTabs);
+} catch(exception) {
+}
+`
+    diffTabInitializer.replaceWith(initializer)
+  }
+
+  restoreSpecialResourcePanels(diffContainer, oldContainer, newContainer)
+
+  return diffContainer.innerHTML
+}
+
 async function comparePages() {
-  const oldHtml = extractBody(oldSpecHtml.value)
-  const newHtml = extractBody(newSpecHtml.value)
+  const normalizedPages = normalizeReleaseHeaders(
+    extractBody(oldSpecHtml.value),
+    extractBody(newSpecHtml.value),
+  )
+  const oldHtml = normalizedPages.oldHtml
+  const newHtml = normalizedPages.newHtml
 
   try {
     rawStatus.value = 'Computing diff...'
-    const val = await executeDiffInWorker(oldHtml, newHtml)
-    renderRawDiff(val, activeOldUrl.value, activeNewUrl.value)
+    const rawDiff = await executeDiffInWorker(
+      maskSpecialResourcePanels(oldHtml),
+      maskSpecialResourcePanels(newHtml),
+    )
+    const val = replaceComparedTabLists(rawDiff, oldHtml, newHtml)
+    renderRawDiff(val, activeOldUrl.value, activeNewUrl.value, normalizedPages.hasReleaseHeader)
   } catch (e) {
     console.error(e)
     rawError.value = 'Diff computation failed: ' + (e as Error).message
@@ -283,13 +648,152 @@ function rewriteRelativeLinks(html: string, oldBaseUrl: string, newBaseUrl: stri
   return tempDiv.innerHTML
 }
 
-function renderRawDiff(diffHtml: string, oldPageUrl: string, newPageUrl: string) {
+function removePresentationOnlyImageDiffs(diffHtml: string): string {
+  const container = document.createElement('div')
+  container.innerHTML = diffHtml
+
+  const meaningfulAttributes = (image: HTMLImageElement): string => {
+    const normalized = image.cloneNode(true) as HTMLImageElement
+    normalized.style.removeProperty('background-color')
+    if (!normalized.getAttribute('style')?.trim()) {
+      normalized.removeAttribute('style')
+    }
+    return Array.from(normalized.attributes)
+      .map(({ name, value }) => `${name.toLowerCase()}=${value}`)
+      .sort()
+      .join('\n')
+  }
+
+  container.querySelectorAll<HTMLElement>('del.diffmod').forEach((removed) => {
+    const inserted = removed.nextElementSibling
+    if (!(inserted instanceof HTMLElement) || !inserted.matches('ins.diffmod')) return
+    if (removed.children.length !== 1 || inserted.children.length !== 1) return
+
+    const oldImage = removed.firstElementChild
+    const newImage = inserted.firstElementChild
+    if (!(oldImage instanceof HTMLImageElement) || !(newImage instanceof HTMLImageElement)) return
+    if (removed.textContent?.trim() || inserted.textContent?.trim()) return
+    if (meaningfulAttributes(oldImage) !== meaningfulAttributes(newImage)) return
+
+    removed.replaceWith(newImage.cloneNode(true))
+    inserted.remove()
+  })
+
+  return container.innerHTML
+}
+
+function removeZeroSizeDiffElements(diffHtml: string): string {
+  const container = document.createElement('div')
+  // Render off-screen so layout metrics are available before the final render.
+  container.style.position = 'absolute'
+  container.style.left = '-99999px'
+  container.style.top = '0'
+  container.style.visibility = 'hidden'
+  container.style.pointerEvents = 'none'
+  container.style.width = `${Math.max(document.documentElement.clientWidth, 1024)}px`
+  container.innerHTML = diffHtml
+  document.body.appendChild(container)
+
+  const selector = '.diffins, .diffmod, .diffdel, ins.diffmod, del.diffmod'
+  const hasRenderableMedia = (el: Element): boolean =>
+    !!el.querySelector('img, svg, video, audio, picture, canvas, iframe, object, embed')
+  const isWhitespaceSensitive = (el: Element): boolean =>
+    !!el.closest('pre, textarea')
+  const unwrapElement = (el: Element) => {
+    const parent = el.parentNode
+    if (!parent) return
+    while (el.firstChild) {
+      parent.insertBefore(el.firstChild, el)
+    }
+    parent.removeChild(el)
+  }
+
+  try {
+    // Remove truly empty wrappers, but preserve any whitespace text they carry.
+    Array.from(container.querySelectorAll(selector)).forEach((el) => {
+      if (isWhitespaceSensitive(el)) return
+      if (el.textContent?.trim().length === 0 && !hasRenderableMedia(el)) {
+        if (el.childNodes.length === 0) {
+          el.remove()
+        } else {
+          unwrapElement(el)
+        }
+      }
+    })
+
+    // Remove zero-size leaf diff nodes until stable.
+    while (true) {
+      const allDiffs = Array.from(container.querySelectorAll(selector))
+      const leafDiffs = allDiffs.filter((el) => !allDiffs.some((other) => other !== el && el.contains(other)))
+      let removed = 0
+
+      leafDiffs.forEach((el) => {
+        if (isWhitespaceSensitive(el)) return
+        const rect = el.getBoundingClientRect()
+        if (rect.width === 0 && rect.height === 0) {
+          unwrapElement(el)
+          removed++
+        }
+      })
+
+      if (removed === 0) break
+    }
+
+    return container.innerHTML
+  } finally {
+    container.remove()
+  }
+}
+
+function renderRawDiff(
+  diffHtml: string,
+  oldPageUrl: string,
+  newPageUrl: string,
+  hasReleaseHeader: boolean,
+) {
   const newBaseUrl = getBaseUrl(newPageUrl)
   const oldBaseUrl = getBaseUrl(oldPageUrl)
 
   const headContent = rebaseHeadUrls(newSpecHtml.value, newBaseUrl, oldBaseUrl)
   diffHtml = rebaseBodySrcUrls(diffHtml, newBaseUrl)
+  diffHtml = removePresentationOnlyImageDiffs(diffHtml)
+  diffHtml = removeZeroSizeDiffElements(diffHtml)
   diffHtml = rewriteRelativeLinks(diffHtml, oldBaseUrl, newBaseUrl)
+
+  if (hasReleaseHeader) {
+    const container = document.createElement('div')
+    container.innerHTML = diffHtml
+    const placeholder = container.querySelector(releaseHeaderPlaceholderSelector)
+    if (placeholder) {
+      const notice = document.createElement('aside')
+      notice.className = 'generated-diff-notice'
+      notice.setAttribute('aria-label', 'Generated comparison notice')
+
+      const heading = document.createElement('strong')
+      heading.textContent = 'Generated difference report - not an original FHIR page'
+      const explanation = document.createElement('p')
+      explanation.textContent = 'This page was generated by comparing the two source URLs below. It is not the original content of either source page.'
+
+      const sourceList = document.createElement('dl')
+      for (const [label, url] of [['Old source', oldPageUrl], ['New source', newPageUrl]]) {
+        const term = document.createElement('dt')
+        term.textContent = label
+        const description = document.createElement('dd')
+        const link = document.createElement('a')
+        link.href = url
+        link.textContent = url
+        link.target = '_blank'
+        link.rel = 'noopener noreferrer'
+        description.appendChild(link)
+        sourceList.append(term, description)
+      }
+
+      notice.append(heading, explanation, sourceList)
+      placeholder.replaceWith(notice)
+      container.querySelectorAll(releaseHeaderPlaceholderSelector).forEach((extra) => extra.remove())
+      diffHtml = container.innerHTML
+    }
+  }
 
   // Link back to the bare compare page (URLs prefilled, but not auto-compared)
   const editUrl = window.location.pathname
@@ -308,6 +812,34 @@ del.diffmod { background-color: #feccbf; }
 ins.diffmod { background-color: #b6ffa7; }
 .diffdel { background-color: #feccbf; }
 .diff-current-highlight { outline: 3px solid #ff6600; outline-offset: 2px; }
+.generated-diff-notice {
+  margin: 0 0 18px;
+  padding: 12px 16px;
+  border: 2px solid #8a4b08;
+  border-radius: 4px;
+  background: #fff4d6;
+  color: #2c210f;
+}
+.generated-diff-notice strong {
+  display: block;
+  margin-bottom: 6px;
+  font-size: 18px;
+}
+.generated-diff-notice p { margin: 0 0 8px; }
+.generated-diff-notice dl { margin: 0; }
+.generated-diff-notice dt {
+  float: left;
+  clear: left;
+  width: 84px;
+  font-weight: bold;
+}
+.generated-diff-notice dd {
+  margin-left: 90px;
+  overflow-wrap: anywhere;
+}
+@media (max-width: 600px) {
+  .generated-diff-notice { margin-left: 60px; }
+}
 #diff-nav {
   position: fixed;
   left: 0;
@@ -417,20 +949,10 @@ window.addEventListener('load', function() {
       return other !== el && el.contains(other);
     });
   });
-  // Skip zero-size diffs (collapsed/empty elements that wouldn't show a
-  // visible highlight box anyway). Logged once for visibility.
-  var skippedZeroSize = 0;
   diffs = diffs.filter(function(el) {
     var rect = el.getBoundingClientRect();
-    if (rect.width === 0 && rect.height === 0) {
-      skippedZeroSize++;
-      return false;
-    }
-    return true;
+    return rect.width !== 0 || rect.height !== 0;
   });
-  if (skippedZeroSize > 0) {
-    console.log('[diffNav] skipped ' + skippedZeroSize + ' zero-size diff element(s)');
-  }
   var currentIdx = -1;
   var counter = document.getElementById('diff-counter');
   var total = document.getElementById('diff-total');
@@ -576,7 +1098,10 @@ window.addEventListener('load', function() {
   // The Vue app is now destroyed by document.write.
   // If the user navigates back, reload so the app bootstraps fresh.
   window.addEventListener('popstate', () => {
-    window.location.reload()
+    const params = new URLSearchParams(window.location.search)
+    if (params.get('edit') === '1') {
+      window.location.reload()
+    }
   })
 }
 
